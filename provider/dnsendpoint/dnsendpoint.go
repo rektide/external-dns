@@ -28,6 +28,8 @@ type dnsEndpointProvider struct {
 	k8sClient    client.Client
 }
 
+var _ provider.Provider = &dnsEndpointProvider{}
+
 func New(ctx context.Context, cfg *externaldns.Config, domainFilter *endpoint.DomainFilter) (provider.Provider, error) {
 	scheme := runtime.NewScheme()
 	if err := apiv1alpha1.AddToScheme(scheme); err != nil {
@@ -56,6 +58,14 @@ func New(ctx context.Context, cfg *externaldns.Config, domainFilter *endpoint.Do
 	}, nil
 }
 
+func newProvider(domainFilter endpoint.DomainFilterInterface, namespace string, k8sClient client.Client) *dnsEndpointProvider {
+	return &dnsEndpointProvider{
+		domainFilter: domainFilter,
+		namespace:    namespace,
+		k8sClient:    k8sClient,
+	}
+}
+
 func (p *dnsEndpointProvider) GetDomainFilter() endpoint.DomainFilterInterface {
 	return p.domainFilter
 }
@@ -73,6 +83,9 @@ func (p *dnsEndpointProvider) Records(ctx context.Context) ([]*endpoint.Endpoint
 			if !p.domainFilter.Match(ep.DNSName) {
 				continue
 			}
+			if ep.Labels == nil {
+				ep.Labels = make(map[string]string)
+			}
 			ep.Labels[endpoint.ResourceLabelKey] = fmt.Sprintf("dnsendpoint/%s/%s", de.Namespace, de.Name)
 			endpoints = append(endpoints, ep)
 		}
@@ -82,7 +95,27 @@ func (p *dnsEndpointProvider) Records(ctx context.Context) ([]*endpoint.Endpoint
 }
 
 func (p *dnsEndpointProvider) ApplyChanges(ctx context.Context, changes *plan.Changes) error {
-	byDNSName := p.groupByDNSName(changes)
+	for _, ep := range changes.Delete {
+		objName := dnsNameToObjectName(ep.DNSName)
+		obj := &apiv1alpha1.DNSEndpoint{}
+		if err := p.k8sClient.Get(ctx, types.NamespacedName{Namespace: p.namespace, Name: objName}, obj); err != nil {
+			log.Warnf("DNSEndpoint %s not found for deletion: %v", objName, err)
+			continue
+		}
+		if err := p.k8sClient.Delete(ctx, obj); err != nil {
+			log.Warnf("Failed to delete DNSEndpoint %s: %v", objName, err)
+		} else {
+			log.Infof("Deleted DNSEndpoint %s/%s", p.namespace, objName)
+		}
+	}
+
+	byDNSName := make(map[string][]*endpoint.Endpoint)
+	for _, ep := range changes.Create {
+		byDNSName[ep.DNSName] = append(byDNSName[ep.DNSName], ep)
+	}
+	for _, ep := range changes.UpdateNew {
+		byDNSName[ep.DNSName] = append(byDNSName[ep.DNSName], ep)
+	}
 
 	for dnsName, eps := range byDNSName {
 		objName := dnsNameToObjectName(dnsName)
@@ -114,33 +147,6 @@ func (p *dnsEndpointProvider) ApplyChanges(ctx context.Context, changes *plan.Ch
 	}
 
 	return nil
-}
-
-func (p *dnsEndpointProvider) groupByDNSName(changes *plan.Changes) map[string][]*endpoint.Endpoint {
-	result := make(map[string][]*endpoint.Endpoint)
-
-	for _, ep := range changes.Create {
-		result[ep.DNSName] = append(result[ep.DNSName], ep)
-	}
-	for _, ep := range changes.UpdateNew {
-		result[ep.DNSName] = append(result[ep.DNSName], ep)
-	}
-
-	for _, ep := range changes.Delete {
-		objName := dnsNameToObjectName(ep.DNSName)
-		obj := &apiv1alpha1.DNSEndpoint{}
-		if err := p.k8sClient.Get(context.Background(), types.NamespacedName{Namespace: p.namespace, Name: objName}, obj); err != nil {
-			log.Warnf("DNSEndpoint %s not found for deletion: %v", objName, err)
-			continue
-		}
-		if err := p.k8sClient.Delete(context.Background(), obj); err != nil {
-			log.Warnf("Failed to delete DNSEndpoint %s: %v", objName, err)
-		} else {
-			log.Infof("Deleted DNSEndpoint %s/%s", p.namespace, objName)
-		}
-	}
-
-	return result
 }
 
 func dnsNameToObjectName(dnsName string) string {
