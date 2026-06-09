@@ -33,6 +33,7 @@ const (
 	ProviderCloudflare   = "cloudflare"
 	ProviderCoreDNS      = "coredns"
 	ProviderSkyDNS       = "skydns"
+	ProviderDNSEndpoint  = "dnsendpoint"
 	ProviderDNSimple     = "dnsimple"
 	ProviderExoscale     = "exoscale"
 	ProviderGandi        = "gandi"
